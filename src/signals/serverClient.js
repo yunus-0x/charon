@@ -87,7 +87,8 @@ export async function fetchServerSignals() {
         trending.set(mint, trendingToken);
       }
 
-      const key = `signal:${mint}`;
+      // Use source-aware key so a signal that gains more sources later isn't blocked
+      const key = signalKey(signal);
       if (seenSignals.has(key)) { processed++; continue; }
       seenSignals.set(key, now());
 
@@ -103,15 +104,24 @@ export async function fetchServerSignals() {
       const sourceCount = signal.sourceCount || 1;
 
       // Strategy gate: check source count
-      if (sourceCount < strat.min_source_count) { processed++; continue; }
+      if (sourceCount < strat.min_source_count) {
+        console.log(`[server] skip ${mint.slice(0, 8)} sources=${sourceCount} < min ${strat.min_source_count}`);
+        processed++; continue;
+      }
 
       // Strategy gate: fee claim requirement
-      if (strat.require_fee_claim && !hasFee) { processed++; continue; }
+      if (strat.require_fee_claim && !hasFee) {
+        console.log(`[server] skip ${mint.slice(0, 8)} no fee claim (strategy requires it)`);
+        processed++; continue;
+      }
 
       // Strategy gate: token age
       if (strat.token_age_max_ms > 0) {
         const tokenAge = signal.ageMs || 0;
-        if (tokenAge > strat.token_age_max_ms) { processed++; continue; }
+        if (tokenAge > strat.token_age_max_ms) {
+          console.log(`[server] skip ${mint.slice(0, 8)} age=${Math.round(tokenAge/60000)}m > max ${Math.round(strat.token_age_max_ms/60000)}m`);
+          processed++; continue;
+        }
       }
 
       // Determine route

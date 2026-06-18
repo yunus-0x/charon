@@ -1,6 +1,6 @@
 import { escapeHtml, fmtPct, fmtSol, fmtUsd, short } from '../format.js';
 import { numSetting, boolSetting, setting, activeStrategy, allStrategies } from '../db/settings.js';
-import { openPositionCount, tradingMode, allPositions } from '../db/positions.js';
+import { openPositionCount, tradingMode, allPositions, getRecapStats } from '../db/positions.js';
 import { savedWallets } from '../enrichment/wallets.js';
 import { gmgnStatusText } from '../enrichment/gmgn.js';
 import { formatPosition } from './format.js';
@@ -20,6 +20,79 @@ export function menuKeyboard() {
           { text: 'Positions', callback_data: 'menu:positions' },
           { text: 'PnL', callback_data: 'menu:pnl' },
         ],
+        [
+          { text: '📊 Recap', callback_data: 'menu:recap' },
+          { text: '🩺 Health', callback_data: 'menu:health' },
+        ],
+      ],
+    },
+  };
+}
+
+export function recapText() {
+  const { allTime, last24h, openPositions: open } = getRecapStats();
+  const strat = activeStrategy();
+
+  function fmtStats(s, label) {
+    if (s.closed === 0 && s.open === 0) return `${label}\nNo trades yet.`;
+    const winRateLine = s.closed > 0
+      ? `Win rate: <b>${s.winRate.toFixed(1)}%</b> (${s.wins}W / ${s.losses}L)`
+      : 'Win rate: —';
+    const avgLine = s.closed > 0 ? `Avg PnL: <b>${s.avgPnlPct >= 0 ? '+' : ''}${s.avgPnlPct.toFixed(1)}%</b> per trade` : '';
+    const totalLine = s.closed > 0
+      ? `Total: <b>${s.totalPnlPct >= 0 ? '+' : ''}${s.totalPnlPct.toFixed(1)}%</b> · <b>${s.totalPnlSol >= 0 ? '+' : ''}${s.totalPnlSol.toFixed(4)} SOL</b>`
+      : '';
+    return [label, `Trades: ${s.closed} closed, ${s.open} open`, winRateLine, avgLine, totalLine].filter(Boolean).join('\n');
+  }
+
+  function fmtReasons(byReason, total) {
+    if (!total) return '';
+    const order = ['SL', 'TRAILING_TP', 'TP', 'PARTIAL_TP', 'PARTIAL_TP2', 'MAX_HOLD', 'MANUAL', 'TIME_EXIT', 'UNKNOWN'];
+    const parts = order
+      .filter(k => byReason[k] > 0)
+      .map(k => `${k}: ${(byReason[k] / total * 100).toFixed(0)}%`);
+    return parts.join(' | ');
+  }
+
+  const bestLines = allTime.best.length
+    ? allTime.best.map((p, i) => {
+        const pnl = Number(p.pnl_percent || 0);
+        const icon = pnl > 0 ? '🟢' : '🔴';
+        return `${icon} ${pnl >= 0 ? '+' : ''}${pnl.toFixed(0)}% ${escapeHtml(p.symbol || p.mint?.slice(0, 6) || '?')} (${p.exit_reason || '?'})`;
+      })
+    : ['—'];
+
+  const reasonsLine = fmtReasons(allTime.byReason, allTime.closed);
+  const openLine = open.length
+    ? open.map(p => `• ${escapeHtml(p.symbol || p.mint?.slice(0, 6))} #${p.id}`).join('\n')
+    : 'None';
+
+  return [
+    '📊 <b>Dry-run Recap</b>',
+    '',
+    fmtStats(allTime, '── All Time ──'),
+    '',
+    fmtStats(last24h, '── Last 24h ──'),
+    '',
+    `── Open Positions ──\n${openLine}`,
+    '',
+    `── Best Trades (All Time) ──\n${bestLines.join('\n')}`,
+    '',
+    reasonsLine ? `── Exit Reasons ──\n${reasonsLine}` : null,
+    '',
+    `Strategy: <b>${escapeHtml(strat.name)}</b>`,
+  ].filter(v => v !== null).join('\n');
+}
+
+export function recapKeyboard() {
+  return {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: 'Positions', callback_data: 'menu:positions' },
+          { text: 'Refresh', callback_data: 'menu:recap' },
+        ],
+        [{ text: 'Back', callback_data: 'menu:main' }],
       ],
     },
   };
@@ -128,6 +201,7 @@ export function agentText() {
     `Size: ${fmtSol(strat.position_size_sol)} SOL`,
     `TP/SL: ${fmtPct(strat.tp_percent)} / ${fmtPct(strat.sl_percent)}`,
     `Trailing: ${strat.trailing_enabled ? fmtPct(strat.trailing_percent) : 'off'}`,
+    `Circuit breaker: <b>${boolSetting('circuit_breaker_enabled', true) ? 'on' : 'off'}</b> (daily loss limit ${fmtSol(numSetting('daily_loss_limit_sol', 0.35))} SOL)`,
   ].join('\n');
 }
 
@@ -154,6 +228,13 @@ export function agentKeyboard() {
           { text: 'Fresh 5m', callback_data: 'set:llm_candidate_max_age_ms:300000' },
           { text: 'Fresh 10m', callback_data: 'set:llm_candidate_max_age_ms:600000' },
           { text: 'Fresh 20m', callback_data: 'set:llm_candidate_max_age_ms:1200000' },
+        ],
+        [{ text: `Circuit Breaker ${boolSetting('circuit_breaker_enabled', true) ? 'on' : 'off'}`, callback_data: 'toggle:circuit_breaker_enabled' }],
+        [
+          { text: 'Loss Limit 0.2', callback_data: 'set:daily_loss_limit_sol:0.2' },
+          { text: '0.35', callback_data: 'set:daily_loss_limit_sol:0.35' },
+          { text: '0.5', callback_data: 'set:daily_loss_limit_sol:0.5' },
+          { text: '1.0', callback_data: 'set:daily_loss_limit_sol:1' },
         ],
         [{ text: 'Back', callback_data: 'menu:main' }],
       ],
@@ -210,6 +291,11 @@ export function strategyMenuText() {
     strat.partial_tp ? `Partial TP: ${strat.partial_tp_sell_percent}% at ${fmtPct(strat.partial_tp_at_percent)}` : null,
     strat.max_hold_ms > 0 ? `Max hold: ${Math.round(strat.max_hold_ms / 60000)}m` : null,
     strat.use_llm ? `LLM: yes (min ${strat.llm_min_confidence}%)` : 'LLM: no (rule-based)',
+    `Slippage — buy: ${strat.buy_slippage_bps ?? 300} bps (${((strat.buy_slippage_bps ?? 300) / 100).toFixed(1)}%) · sell: ${strat.sell_slippage_bps ?? 1000} bps (${((strat.sell_slippage_bps ?? 1000) / 100).toFixed(1)}%)`,
+    strat.conviction_sizing ? `Conviction sizing: ${fmtSol(strat.position_size_min_sol)}–${fmtSol(strat.position_size_max_sol)} SOL by confidence` : null,
+    (strat.require_mint_revoked || strat.require_freeze_revoked || strat.max_dev_holder_percent > 0)
+      ? `Audit gate: ${[strat.require_mint_revoked ? 'mint-revoked' : null, strat.require_freeze_revoked ? 'freeze-revoked' : null, strat.max_dev_holder_percent > 0 ? `dev ≤${strat.max_dev_holder_percent}%` : null].filter(Boolean).join(', ')}`
+      : null,
     '',
     ...all.map(s => `${s.enabled ? '▶' : '○'} ${s.name}`),
   ].filter(Boolean).join('\n');
@@ -278,6 +364,22 @@ export function strategyKeyboard() {
     [
       { text: `Partial At ${strat.partial_tp_at_percent}%`, callback_data: 'stratinput:partial_tp_at_percent' },
     ],
+    [
+      { text: `Buy Slip ${strat.buy_slippage_bps ?? 300}bps`, callback_data: 'stratcfg:buy_slippage_bps' },
+      { text: `Sell Slip ${strat.sell_slippage_bps ?? 1000}bps`, callback_data: 'stratcfg:sell_slippage_bps' },
+    ],
+    [
+      { text: `Conviction ${strat.conviction_sizing ? 'on' : 'off'}`, callback_data: 'stratcfg:conviction_sizing' },
+      { text: `Dev Max ${strat.max_dev_holder_percent > 0 ? strat.max_dev_holder_percent + '%' : 'off'}`, callback_data: 'stratcfg:max_dev_holder_percent' },
+    ],
+    [
+      { text: `Size Min ${fmtSol(strat.position_size_min_sol ?? strat.position_size_sol)}`, callback_data: 'stratcfg:position_size_min_sol' },
+      { text: `Size Max ${fmtSol(strat.position_size_max_sol ?? strat.position_size_sol)}`, callback_data: 'stratcfg:position_size_max_sol' },
+    ],
+    [
+      { text: `Mint Rev ${strat.require_mint_revoked ? 'on' : 'off'}`, callback_data: 'stratcfg:require_mint_revoked' },
+      { text: `Freeze Rev ${strat.require_freeze_revoked ? 'on' : 'off'}`, callback_data: 'stratcfg:require_freeze_revoked' },
+    ],
   ];
   return {
     reply_markup: {
@@ -312,15 +414,11 @@ export function candidateButtons(candidateId, decision = null) {
     return {
       reply_markup: {
         inline_keyboard: [
-          [{ text: 'LLM BUY selected', callback_data: 'noop' }],
           [
-            { text: 'View Candidate', callback_data: `cand:${candidateId}` },
             { text: 'Positions', callback_data: 'menu:positions' },
+            { text: 'Dry Buy', callback_data: `buy:${candidateId}` },
           ],
-          [
-            { text: 'Set TP/SL', callback_data: `tpsl:c:${candidateId}` },
-            { text: 'Ignore', callback_data: `ign:${candidateId}` },
-          ],
+          [{ text: 'Ignore', callback_data: `ign:${candidateId}` }],
         ],
       },
     };
